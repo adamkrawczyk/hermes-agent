@@ -17,6 +17,7 @@ The parent's context only sees the delegation call and the summary result,
 never the child's intermediate tool calls or reasoning.
 """
 
+import copy
 import enum
 import contextvars
 import json
@@ -3820,6 +3821,7 @@ def delegate_task(
     action: Optional[str] = None,
     subagent_id: Optional[str] = None,
     message: Optional[str] = None,
+    model: Optional[str] = None,
     parent_agent=None,
     credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -3957,6 +3959,8 @@ def delegate_task(
         single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
         if output_schema is not None:
             single_task["output_schema"] = output_schema
+        if model is not None:
+            single_task["model"] = model
         task_list = [single_task]
     else:
         return tool_error(
@@ -3976,6 +3980,27 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+
+    # Per-task model choices must come from the configured pool (if one is
+    # set). Runs before any child is built, so a name that is not a real model
+    # in the pool costs nothing and cannot spawn a doomed subagent. A task
+    # that names no model falls through to the global pin (delegation.model).
+    for i, task in enumerate(task_list):
+        if not isinstance(task, dict):
+            continue
+        choice = task.get("model")
+        if choice is not None and not str(choice).strip():
+            return tool_error(
+                f"Task {i} has an empty 'model' string; either name a model "
+                f"from delegation.model_pool or omit the field to use the pin."
+            )
+        where = "Top-level model" if i == 0 and tasks is None else f"Task {i}"
+        try:
+            _check_delegation_model_choice(
+                str(choice).strip() if choice is not None else None, where
+            )
+        except ValueError as exc:
+            return tool_error(str(exc))
 
     # Batch-only quality gate: catch malformed fan-outs (placeholder goals,
     # unexpanded multi-word template markers, 1-task batches) before any
@@ -4057,6 +4082,21 @@ def delegate_task(
         # Per-task role beats top-level; normalise again so unknown
         # per-task values warn and degrade to leaf uniformly.
         effective_role = _normalize_role(t.get("role") or top_role)
+        # Per-task model beats the global pin; a task that names no model
+        # (or names an empty one) keeps the pin. The choice was already
+        # validated against delegation.model_pool above (when a pool is set).
+        # A provider-qualified choice (zai/glm-5.2) re-resolves the full
+        # credential bundle for that provider; a bare choice just swaps the
+        # model name on the pin's bundle.
+        _task_model = t.get("model")
+        if _task_model is not None and not str(_task_model).strip():
+            _task_model = None
+        _task_model = str(_task_model).strip() if _task_model else None
+        if _task_model:
+            _task_creds = _resolve_pool_entry(_task_model, creds)
+        else:
+            _task_creds = creds
+        _effective_model = _task_creds.get("model") or None
         # T1-24: schema'd tasks get the contract appended to their context
         # so the child knows the expected output shape before it starts.
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
@@ -4073,18 +4113,18 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=_effective_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=_task_creds.get("provider"),
+                override_base_url=_task_creds.get("base_url"),
+                override_api_key=_task_creds.get("api_key"),
+                override_api_mode=_task_creds.get("api_mode"),
+                override_request_overrides=_task_creds.get("request_overrides"),
+                override_max_tokens=_task_creds.get("max_output_tokens"),
+                override_acp_command=_task_creds.get("command"),
+                override_acp_args=_task_creds.get("args"),
                 role=effective_role,
             )
         except ValueError as exc:
@@ -4686,6 +4726,100 @@ def _merge_request_overrides(runtime_overrides, explicit_overrides):
     elif explicit_extra is not None:
         merged["extra_body"] = explicit_extra
     return merged or None
+def _delegation_model_pool() -> list:
+    """Return the per-task model pool (``delegation.model_pool``) as strings.
+
+    Each entry is a model name, optionally qualified with a provider
+    (``"zai/glm-5.2"``). A bare name inherits the pin's provider; a qualified
+    name routes to its named provider even when that differs from the pin, so
+    one pool can mix Anthropic and Z.AI (or any two configured providers).
+
+    Empty/absent pool -> ``[]`` (feature off, any model string accepted).
+    """
+    try:
+        raw = _load_config().get("model_pool")
+    except Exception:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(m).strip() for m in raw if str(m).strip()]
+
+
+def _split_qualified_model(name: str):
+    """Split ``"provider/model"`` into ``(provider, model)``; else ``(None, name)``.
+
+    A model name is ``provider/model`` when its first ``/`` is followed by a
+    non-empty model part and the provider part contains no ``/``. Plain model
+    ids (``claude-opus-5``) and already-qualified ones handled by the resolver
+    (``zai/glm-5.2``) both pass through; only the provider-qualified form is
+    re-resolved. A trailing or leading ``/`` or a ``/`` with an empty model is
+    treated as a bare (unqualified) name.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return (None, name)
+    if name.count("/") == 1:
+        prov, _, model = name.partition("/")
+        if prov and model and "/" not in prov:
+            return (prov.strip().lower(), model)
+    return (None, name)
+
+
+def _check_delegation_model_choice(choice: Optional[str], where: str) -> None:
+    """Refuse a per-task model choice that is not in the configured pool.
+
+    Runs before any child is built, so a bad name costs nothing. No pool
+    configured -> no check (backward compatible). `choice` of None/"" means
+    "use the pin" and is never rejected. A qualified entry (``provider/model``)
+    must match a pool entry exactly (provider + model) to pass.
+    """
+    if not choice or not str(choice).strip():
+        return
+    pool = _delegation_model_pool()
+    if not pool:
+        return
+    if str(choice).strip() not in pool:
+        raise ValueError(
+            f"{where} requested model '{choice}', which is not in the "
+            f"delegation.model_pool. Allowed: {', '.join(pool)}. "
+            f"Either pick one of those, or leave model unset to use the "
+            f"configured pin (delegation.model)."
+        )
+
+
+def _resolve_pool_entry(choice: str, creds: dict) -> dict:
+    """Resolve a per-task model choice into the credential bundle to build with.
+
+    A bare choice reuses the pin's credentials (just swap the model name). A
+    provider-qualified choice (``zai/glm-5.2``) re-resolves the full bundle for
+    that provider via the same runtime path the pin uses, so the child speaks
+    the right transport (Z.AI chat_completions, not Anthropic Messages).
+    Falls back to the pin's bundle (with the swapped model) only when the
+    entry's provider cannot be resolved, which is the safe-but-silent case the
+    caller can detect via a mismatch in ``provider``.
+    """
+    provider, model = _split_qualified_model(choice)
+    if not provider:
+        return {**creds, "model": model}
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested=provider, target_model=model)
+        return {
+            "model": model,
+            "provider": runtime.get("provider") or provider,
+            "base_url": runtime.get("base_url"),
+            "api_key": runtime.get("api_key") or None,
+            "api_mode": runtime.get("api_mode"),
+            "request_overrides": dict(runtime.get("request_overrides") or {}),
+            "max_output_tokens": runtime.get("max_output_tokens"),
+            "command": runtime.get("command"),
+            "args": list(runtime.get("args") or []),
+        }
+    except Exception:
+        # Provider not configured -> use the pin's transport and let the
+        # child's own error surface the real cause rather than hiding it here.
+        return {**creds, "model": model}
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
@@ -5077,7 +5211,46 @@ def _build_dynamic_schema_overrides() -> dict:
     overrides_params["properties"] = {
         k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()
     }
+    # tasks.items is nested two levels down; the shallow dict(v) copy above
+    # still shares it with the static schema, so deep-copy before mutating.
+    if "tasks" in overrides_params["properties"]:
+        overrides_params["properties"]["tasks"] = copy.deepcopy(
+            overrides_params["properties"]["tasks"]
+        )
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
+    pool = _delegation_model_pool()
+    pin = str(_load_config().get("model") or "").strip()
+    if "model" in overrides_params["properties"]:
+        if pool:
+            overrides_params["properties"]["model"]["description"] = (
+                "Model for THIS call's subagent(s). Allowed values "
+                "(delegation.model_pool): "
+                + ", ".join(pool)
+                + (
+                    f". Leave unset to use the pin ({pin})."
+                    if pin else ". Leave unset to inherit from the parent."
+                )
+                + " A per-task 'model' inside 'tasks' overrides this for that task."
+            )
+        else:
+            overrides_params["properties"]["model"]["description"] = (
+                "Optional model for THIS call's subagent(s). When unset, "
+                "children inherit the configured pin (delegation.model) or the "
+                "parent. Any model string is accepted (no pool configured)."
+            )
+    _t_props = (
+        overrides_params["properties"]
+        .get("tasks", {})
+        .get("items", {})
+        .get("properties", {})
+    )
+    if "model" in _t_props:
+        _t_props["model"]["description"] = (
+            "Per-task model override. When a delegation.model_pool is set, "
+            "must be one of: "
+            + (", ".join(pool) if pool else "(no pool — any model)")
+            + "; falls back to the pin (delegation.model) when unset."
+        )
 
     return {
         "description": _build_top_level_description(),
@@ -5108,6 +5281,16 @@ DELEGATE_TASK_SCHEMA = {
             # (object) — wrapped into a one-entry batch at dispatch. Legacy,
             # unadvertised (old transcripts/callers only); tasks=[...] is the
             # only advertised shape. Do not re-add these to the schema.
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model for THIS call's subagent(s). When unset, children "
+                    "inherit the configured pin (delegation.model). When set, "
+                    "it must be a member of delegation.model_pool if that pool "
+                    "is configured (any model if no pool is set). A per-task "
+                    "'model' inside 'tasks' overrides this for that task."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "minItems": 1,
@@ -5129,6 +5312,16 @@ DELEGATE_TASK_SCHEMA = {
                                 "error messages, constraints. Each child "
                                 "sees only its own context — repeat shared "
                                 "background in every task that needs it."
+                            ),
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override. Must be in "
+                                "delegation.model_pool when a pool is set; "
+                                "falls back to the pin (delegation.model) "
+                                "when unset. Use to run one worker on a "
+                                "different model within the same batch."
                             ),
                         },
                         "output_schema": {
@@ -5250,6 +5443,7 @@ registry.register(
         action=args.get("action"),
         subagent_id=args.get("subagent_id"),
         message=args.get("message"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
