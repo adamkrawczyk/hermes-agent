@@ -305,7 +305,49 @@ class TestModelPoolQualifiedProvider(unittest.TestCase):
         self.assertEqual(dt._split_qualified_model("claude-opus-5"),
                          (None, "claude-opus-5"))
         self.assertEqual(dt._split_qualified_model(""), (None, ""))
+        # Leading/trailing slash -> not qualified (one side empty).
         self.assertEqual(dt._split_qualified_model("/glm"), (None, "/glm"))
+        self.assertEqual(dt._split_qualified_model("zai/"), (None, "zai/"))
+
+    def test_split_keeps_slashes_inside_model_id(self):
+        """REGRESSION: model ids contain slashes.
+
+        `custom:hetzner/Qwen/Qwen3.6-35B-A3B-FP8` is provider
+        `custom:hetzner` + model `Qwen/Qwen3.6-35B-A3B-FP8`. The first
+        implementation required exactly one slash, so this entry parsed as
+        UNqualified and silently inherited the pin's Anthropic transport: it
+        passed the pool check, then would have died at the first API call
+        against the wrong endpoint. Split on the FIRST slash only.
+        """
+        self.assertEqual(
+            dt._split_qualified_model("custom:hetzner/Qwen/Qwen3.6-35B-A3B-FP8"),
+            ("custom:hetzner", "Qwen/Qwen3.6-35B-A3B-FP8"))
+        self.assertEqual(
+            dt._split_qualified_model("custom:qwen38-local/qwen3.8-27b-heretic"),
+            ("custom:qwen38-local", "qwen3.8-27b-heretic"))
+
+    def test_multislash_entry_does_not_fall_back_to_pin(self):
+        """The end-to-end shape of the same bug: a multi-slash entry must not
+        come back on the pin's provider."""
+        def fake_runtime(requested=None, target_model=None, **kw):
+            return {"provider": "custom", "model": target_model,
+                    "base_url": "https://inference.hetzner.com/api/v1",
+                    "api_key": "hz", "api_mode": "chat_completions",
+                    "request_overrides": {}, "max_output_tokens": None,
+                    "command": None, "args": []}
+
+        pin = {"model": "claude-sonnet-5", "provider": "anthropic",
+               "base_url": "https://api.anthropic.com", "api_key": "k",
+               "api_mode": "anthropic_messages", "request_overrides": None,
+               "max_output_tokens": None, "command": None, "args": []}
+
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   side_effect=fake_runtime):
+            out = dt._resolve_pool_entry(
+                "custom:hetzner/Qwen/Qwen3.6-35B-A3B-FP8", pin)
+        self.assertEqual(out["model"], "Qwen/Qwen3.6-35B-A3B-FP8")
+        self.assertNotEqual(out["provider"], "anthropic")
+        self.assertNotEqual(out["base_url"], "https://api.anthropic.com")
 
 
 if __name__ == "__main__":
