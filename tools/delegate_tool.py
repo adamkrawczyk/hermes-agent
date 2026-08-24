@@ -4748,20 +4748,24 @@ def _delegation_model_pool() -> list:
 def _split_qualified_model(name: str):
     """Split ``"provider/model"`` into ``(provider, model)``; else ``(None, name)``.
 
-    A model name is ``provider/model`` when its first ``/`` is followed by a
-    non-empty model part and the provider part contains no ``/``. Plain model
-    ids (``claude-opus-5``) and already-qualified ones handled by the resolver
-    (``zai/glm-5.2``) both pass through; only the provider-qualified form is
-    re-resolved. A trailing or leading ``/`` or a ``/`` with an empty model is
-    treated as a bare (unqualified) name.
+    Splits on the FIRST ``/`` only, because model ids legitimately contain
+    slashes (``custom:hetzner/Qwen/Qwen3.6-35B-A3B-FP8`` is provider
+    ``custom:hetzner`` + model ``Qwen/Qwen3.6-35B-A3B-FP8``). An earlier
+    version required exactly one slash and silently fell back to the pin's
+    provider for such entries — the entry passed the pool check and then died
+    at the first API call against the wrong endpoint.
+
+    A name is treated as qualified only when BOTH sides are non-empty, so
+    ``"/glm"``, ``"zai/"`` and a bare ``"claude-opus-5"`` all pass through
+    unqualified.
     """
     name = str(name or "").strip()
-    if not name:
+    if not name or "/" not in name:
         return (None, name)
-    if name.count("/") == 1:
-        prov, _, model = name.partition("/")
-        if prov and model and "/" not in prov:
-            return (prov.strip().lower(), model)
+    prov, _, model = name.partition("/")
+    prov, model = prov.strip(), model.strip()
+    if prov and model:
+        return (prov.lower(), model)
     return (None, name)
 
 
