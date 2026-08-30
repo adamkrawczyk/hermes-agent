@@ -352,3 +352,164 @@ class TestModelPoolQualifiedProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTopLevelModelAppliesToTasksBatch(unittest.TestCase):
+    """Regression coverage for the bug where the top-level `model` kwarg was
+    silently ignored whenever the caller also passed `tasks=[...]`.
+
+    Precedence contract (from the schema description at
+    _build_dynamic_schema_overrides): per-task model > top-level model >
+    configured pin (delegation.model) > parent inheritance.
+    """
+
+    def _cfg(self, pool=None, pin=PIN):
+        cfg = {"model": pin, "provider": "openrouter",
+               "base_url": "https://openrouter.ai/api/v1",
+               "api_key": "***", "api_mode": "chat_completions"}
+        if pool is not None:
+            cfg["model_pool"] = pool
+        return cfg
+
+    def _creds(self, pin=PIN):
+        return {"model": pin, "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "***", "api_mode": "chat_completions",
+                "request_overrides": None, "max_output_tokens": None,
+                "command": None, "args": []}
+
+    def _run(self, cfg, parent, **kwargs):
+        captured = []
+
+        def fake_build(*args, **kw):
+            captured.append(kw.get("model"))
+            child = MagicMock()
+            child.model = kw.get("model")
+            return child
+
+        with _NoAgentRun(), \
+                patch.object(dt, "_load_config", return_value=cfg), \
+                patch.object(dt, "_resolve_delegation_credentials",
+                             return_value=self._creds()), \
+                patch.object(dt, "_build_child_preserving_parent_tools",
+                             side_effect=fake_build):
+            result = delegate_task(parent_agent=parent, **kwargs)
+        return captured, result
+
+    def test_top_level_model_applies_to_every_task_in_batch(self):
+        """The core bug: top-level `model` + `tasks=[...]` must NOT run on
+        the pin. Before the fix, `task_list = tasks` never consulted
+        `model`, so both children silently ran on PIN instead of the
+        requested pool member."""
+        parent = _parent()
+        models, result = self._run(
+            self._cfg(pool=["claude-haiku-4-5", PIN]),
+            parent,
+            model="claude-haiku-4-5",
+            tasks=[
+                {"goal": "review the auth module thoroughly"},
+                {"goal": "review the payments module thoroughly"},
+            ],
+            background=False,
+        )
+        self.assertEqual(models, ["claude-haiku-4-5", "claude-haiku-4-5"])
+
+    def test_per_task_model_overrides_top_level_in_batch(self):
+        parent = _parent()
+        models, result = self._run(
+            self._cfg(pool=["claude-haiku-4-5", "claude-opus-5", PIN]),
+            parent,
+            model="claude-haiku-4-5",
+            tasks=[
+                {"goal": "refactor the auth module code", "model": "claude-opus-5"},  # per-task wins
+                {"goal": "write integration test suite"},  # falls back to top-level model
+            ],
+            background=False,
+        )
+        self.assertEqual(models, ["claude-opus-5", "claude-haiku-4-5"])
+
+    def test_top_level_model_outside_pool_rejected_before_any_child_in_batch(self):
+        parent = _parent()
+        models, result = self._run(
+            self._cfg(pool=["claude-haiku-4-5", PIN]),
+            parent,
+            model="claude-opus-5",  # not in pool
+            tasks=[
+                {"goal": "refactor the auth module code"},
+                {"goal": "write integration test suite"},
+            ],
+            background=False,
+        )
+        self.assertEqual(models, [])  # nothing built
+        self.assertIn("model_pool", result)
+        self.assertIn("claude-opus-5", result)
+
+    def test_top_level_qualified_model_in_batch_resolves_full_bundle(self):
+        """A provider-qualified top-level model (zai/glm-5.3-flash) must
+        re-resolve the FULL credential bundle for that provider via
+        _resolve_pool_entry — not just swap the model name onto the pin's
+        (e.g. Anthropic) bundle. Verifies this holds when the model comes
+        from the TOP LEVEL, not just per-task."""
+        parent = _parent()
+
+        def fake_runtime(requested=None, target_model=None, **kw):
+            self.assertEqual(requested, "zai")
+            self.assertEqual(target_model, "glm-5.3-flash")
+            return {
+                "provider": "zai", "model": "glm-5.3-flash",
+                "base_url": "https://api.z.ai/v1",
+                "api_key": "zai-key", "api_mode": "chat_completions",
+                "request_overrides": {}, "max_output_tokens": None,
+                "command": None, "args": [],
+            }
+
+        captured_providers = []
+        captured_base_urls = []
+
+        def fake_build(*args, **kw):
+            captured_providers.append(kw.get("override_provider"))
+            captured_base_urls.append(kw.get("override_base_url"))
+            child = MagicMock()
+            child.model = kw.get("model")
+            return child
+
+        with _NoAgentRun(), \
+                patch.object(dt, "_load_config",
+                             return_value=self._cfg(
+                                 pool=["claude-haiku-4-5", "zai/glm-5.3-flash", PIN])), \
+                patch.object(dt, "_resolve_delegation_credentials",
+                             return_value=self._creds()), \
+                patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                      side_effect=fake_runtime), \
+                patch.object(dt, "_build_child_preserving_parent_tools",
+                             side_effect=fake_build):
+            result = delegate_task(
+                parent_agent=parent,
+                model="zai/glm-5.3-flash",
+                tasks=[
+                    {"goal": "refactor the auth module code"},
+                    {"goal": "write integration test suite"},
+                ],
+                background=False,
+            )
+        # Both children must have gone through the zai transport, not the
+        # openrouter/anthropic pin bundle.
+        self.assertEqual(captured_providers, ["zai", "zai"])
+        self.assertEqual(captured_base_urls,
+                          ["https://api.z.ai/v1", "https://api.z.ai/v1"])
+
+    def test_unset_model_in_batch_unchanged_uses_pin(self):
+        """No regression: when `model` is unset, batch tasks still fall
+        through to the pin exactly as before."""
+        parent = _parent()
+        models, result = self._run(
+            self._cfg(pool=["claude-haiku-4-5", PIN]),
+            parent,
+            tasks=[
+                {"goal": "refactor the auth module code"},
+                {"goal": "write integration test suite"},
+            ],
+            background=False,
+        )
+        self.assertEqual(models, [PIN, PIN])
+

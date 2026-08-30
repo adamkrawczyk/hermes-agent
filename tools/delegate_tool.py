@@ -3945,6 +3945,12 @@ def delegate_task(
     if isinstance(tasks, list) and not tasks:
         tasks = None
 
+    # Tracks which task indices got their `model` from the top-level
+    # `model` kwarg (as opposed to naming their own) — used below only to
+    # keep the pool-validation error labelling sensible ("Top-level model"
+    # vs "Task N"); it has no effect on resolution/precedence itself.
+    _top_level_model_task_indices: set = set()
+
     if tasks and isinstance(tasks, list):
         if len(tasks) > max_children:
             return tool_error(
@@ -3955,6 +3961,23 @@ def delegate_task(
                 f"delegation.max_concurrent_children in config.yaml."
             )
         task_list = tasks
+        # Top-level `model` is the DEFAULT for every task in the batch that
+        # doesn't name its own `model` — this is the documented contract in
+        # the tool schema ("A per-task 'model' inside 'tasks' overrides this
+        # for that task"), which previously only held for the single-`goal`
+        # form: this branch aliased `task_list = tasks` directly and never
+        # consulted the top-level `model` at all, so it was silently dropped
+        # whenever the caller used `tasks=[...]`. A per-task `model` still
+        # wins for that task. We build fresh dicts instead of mutating the
+        # caller's task objects in place.
+        if model is not None:
+            _defaulted_task_list = []
+            for _idx, _t in enumerate(task_list):
+                if isinstance(_t, dict) and _t.get("model") is None:
+                    _t = {**_t, "model": model}
+                    _top_level_model_task_indices.add(_idx)
+                _defaulted_task_list.append(_t)
+            task_list = _defaulted_task_list
     elif goal and isinstance(goal, str) and goal.strip():
         single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
         if output_schema is not None:
@@ -3994,7 +4017,11 @@ def delegate_task(
                 f"Task {i} has an empty 'model' string; either name a model "
                 f"from delegation.model_pool or omit the field to use the pin."
             )
-        where = "Top-level model" if i == 0 and tasks is None else f"Task {i}"
+        where = (
+            "Top-level model"
+            if (i == 0 and tasks is None) or i in _top_level_model_task_indices
+            else f"Task {i}"
+        )
         try:
             _check_delegation_model_choice(
                 str(choice).strip() if choice is not None else None, where
