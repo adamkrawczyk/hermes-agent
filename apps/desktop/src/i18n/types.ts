@@ -705,6 +705,15 @@ export interface Translations {
       }
       backdropTitle: string
       backdropDesc: string
+      cuttlefishTitle: string
+      cuttlefishDesc: string
+      cuttlefishDensity: string
+      cuttlefishDensityDesc: string
+      cuttlefishCalm: string
+      cuttlefishAlive: string
+      cuttlefishDensityLow: string
+      cuttlefishDensityMid: string
+      cuttlefishDensityHigh: string
       userBubbleTitle: string
       userBubbleDesc: string
       introSplashTitle: string

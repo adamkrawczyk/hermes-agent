@@ -730,7 +730,7 @@ const ChatViewContent = memo(function ChatViewContent({
       data-session-anchor={sessionAnchor}
     >
       <Backdrop />
-      <CuttlefishField sessionId={runtimeId} />
+      {activeSessionId ? <CuttlefishField sessionId={activeSessionId} /> : null}
       {/* Tiles get their chrome from the layout zone (chip strip); the modal
           prompt overlays stay active-session-scoped in the primary surface. */}
       {isPrimary && (
