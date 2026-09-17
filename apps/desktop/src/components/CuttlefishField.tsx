@@ -15,6 +15,7 @@ import { useEffect, useRef } from 'react'
 
 import type { IdentityColor } from '@/field/identity'
 import { allocate } from '@/field/identity'
+import { measureTranscriptMask } from '@/field/mask'
 import { FIELD_FRAGMENT_SOURCE, FIELD_VERTEX_SOURCE } from '@/field/shader'
 import { $cuttlefish } from '@/store/cuttlefish'
 
@@ -24,9 +25,11 @@ export interface CuttlefishFieldProps {
   livePeers?: readonly string[]
   /** Acute signal for THIS session's surface. */
   signal?: 'resting' | 'needs_me' | 'fault'
+  /** Transcript element whose content box becomes the glyph mask. */
+  transcriptEl?: HTMLElement | null
 }
 
-export function CuttlefishField({ sessionId, livePeers = [], signal = 'resting' }: CuttlefishFieldProps) {
+export function CuttlefishField({ sessionId, livePeers = [], signal = 'resting', transcriptEl = null }: CuttlefishFieldProps) {
   const state = useStore($cuttlefish)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -82,6 +85,11 @@ export function CuttlefishField({ sessionId, livePeers = [], signal = 'resting' 
     const u = (name: string) => gl.getUniformLocation(prog, name)!
 
     const identity = identityRef.current!
+    // The transcript scroller is the glyph mask target; it lives in this
+    // surface's DOM (aui_thread-viewport). Queried per effect, measured per
+    // frame — no ref plumbing through third-party Thread internals.
+    const findTranscript = (): HTMLElement | null =>
+      transcriptEl ?? (canvas.closest('[data-chat-surface]')?.querySelector<HTMLElement>('[data-slot="aui_thread-viewport"]') ?? null)
     const draw = (t: number) => {
       const dpr = state.density >= 2 ? window.devicePixelRatio : 1
       const w = Math.floor(canvas.clientWidth * dpr)
@@ -95,7 +103,19 @@ export function CuttlefishField({ sessionId, livePeers = [], signal = 'resting' 
       gl.uniform1f(u('uTime'), animated ? t : 1_000_000)
       gl.uniform1f(u('uHueDeg'), identity.oklch.h)
       gl.uniform1i(u('uSignal'), signal === 'resting' ? 0 : signal === 'needs_me' ? 1 : 2)
-      gl.uniform1i(u('uMaskCount'), 0)
+      // Glyph mask: measured per frame so streaming/resize keeps it true; the
+      // contraction is frozen-instant, so re-measure never causes shimmer.
+      const box = measureTranscriptMask(canvas, findTranscript())
+      gl.uniform1i(u('uMaskCount'), box ? 1 : 0)
+      const boxes = new Float32Array(16 * 4)
+      if (box) {
+        // gl_FragCoord is bottom-up; the measured box is top-down CSS space.
+        boxes[0] = box.x0
+        boxes[1] = box.x1
+        boxes[2] = h - box.y1
+        boxes[3] = h - box.y0
+      }
+      gl.uniform4fv(u('uMaskBoxes'), boxes)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
 
@@ -118,7 +138,7 @@ export function CuttlefishField({ sessionId, livePeers = [], signal = 'resting' 
       const lose = gl.getExtension('WEBGL_lose_context')
       lose?.loseContext()
     }
-  }, [state.mode, state.density, signal, peersKey, sessionId])
+  }, [state.mode, state.density, signal, peersKey, sessionId, transcriptEl])
 
   if (state.mode === 'off') return null
 

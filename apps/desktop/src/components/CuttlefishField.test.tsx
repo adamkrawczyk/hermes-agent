@@ -37,6 +37,7 @@ class FakeWebGL2 {
   uniform2f() {}
   uniform1f() {}
   uniform1i() {}
+  uniform4fv() {}
   drawArrays() {}
   getExtension() { return { loseContext() {} } }
 }
