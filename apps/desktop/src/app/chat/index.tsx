@@ -12,6 +12,9 @@ import { sessionShouldHaveTranscript } from '@/app/session/hooks/use-session-act
 import { Thread } from '@/components/assistant-ui/thread'
 import { TranscriptWindowProvider } from '@/components/assistant-ui/thread/transcript-window'
 import { Backdrop } from '@/components/Backdrop'
+import { CuttlefishField } from '@/components/CuttlefishField'
+import { railLabel, signalForDotState } from '@/field/signal'
+import { $fieldSignalByRuntimeId } from '@/field/signal-store'
 import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
 import { usePaneGroup, usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { $hoveredTreeGroup, $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
@@ -461,6 +464,11 @@ const ChatViewContent = memo(function ChatViewContent({
   const composerSurfaceId = useComposerSurfaceId()
   const isPrimary = view.kind === 'primary'
   const activeSessionId = useStore(view.$runtimeId)
+  // Cuttlefish acute signal: runtime-keyed derivation; the rail label is a
+  // literal (INPUT Nm / ERROR Nm) per plan §3.
+  const fieldSignalMap = useStore($fieldSignalByRuntimeId)
+  const fieldSignal = fieldSignalMap[activeSessionId ?? ''] ?? 'resting'
+  const fieldLabel = railLabel(fieldSignal, 0)
 
   const transcriptStoredSessionId = useStoreSelector($sessionStates, states =>
     activeSessionId ? (states[activeSessionId]?.storedSessionId ?? null) : null
@@ -729,6 +737,19 @@ const ChatViewContent = memo(function ChatViewContent({
       data-session-anchor={sessionAnchor}
     >
       <Backdrop />
+      {activeSessionId ? <CuttlefishField sessionId={activeSessionId} signal={fieldSignal} /> : null}
+      {fieldLabel ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute right-2 top-2 z-20 rounded-sm px-1.5 py-0.5 font-mono text-[10px] tracking-wider"
+          data-cuttlefish-rail={fieldSignal}
+          style={fieldSignal === 'fault'
+            ? { background: 'rgba(154,22,32,0.82)', color: '#FFD9DC' }
+            : { background: 'rgba(120,84,10,0.82)', color: '#FFEFC2' }}
+        >
+          {fieldLabel}
+        </div>
+      ) : null}
       {/* Tiles get their chrome from the layout zone (chip strip); the modal
           prompt overlays stay active-session-scoped in the primary surface. */}
       {isPrimary && (

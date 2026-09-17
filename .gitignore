@@ -109,6 +109,7 @@ apps/shared/src/**/*.js
 apps/shared/src/**/*.js.map
 apps/shared/src/**/*.d.ts
 apps/desktop/release/
+apps/desktop/artifacts/
 # stage-and-swap Desktop rebuild output (#86443); removed after the swap, but
 # a killed build must not leave the checkout dirty
 apps/desktop/.staging-*/

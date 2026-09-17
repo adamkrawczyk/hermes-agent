@@ -15,6 +15,7 @@ import { selectableCardClass } from '@/lib/selectable-card'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { $backdrop, setBackdrop } from '@/store/backdrop'
+import { $cuttlefish, setCuttlefishDensity, setCuttlefishMode } from '@/store/cuttlefish'
 import { $composerPopoutGesturesEnabled, setComposerPopoutGesturesEnabled } from '@/store/composer-popout'
 import { $embedAllowed, $embedMode, clearEmbedAllowed, type EmbedMode, setEmbedMode } from '@/store/embed-consent'
 import { $introSplash, setIntroSplash } from '@/store/intro-splash'
@@ -419,6 +420,7 @@ export function AppearanceSettings() {
   const spentTips = useStore($spentTipCount)
   const vibeHeartsEnabled = useStore($vibeHeartsEnabled)
   const backdrop = useStore($backdrop)
+  const cuttlefish = useStore($cuttlefish)
   const introSplash = useStore($introSplash)
   const installs = useStore($marketplaceInstalls)
   const profiles = useStore($profiles)
@@ -813,6 +815,48 @@ export function AppearanceSettings() {
             id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.backdrop)}
             title={a.backdropTitle}
           />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setCuttlefishMode(id as 'off' | 'calm' | 'alive')
+                }}
+                options={[
+                  { id: 'off', label: t.common.off },
+                  { id: 'calm', label: a.cuttlefishCalm },
+                  { id: 'alive', label: a.cuttlefishAlive }
+                ]}
+                value={cuttlefish.mode}
+              />
+            }
+            description={a.cuttlefishDesc}
+            id={appearanceSettingElementId(APPEARANCE_SETTING_IDS.cuttlefish)}
+            title={a.cuttlefishTitle}
+          />
+
+          {cuttlefish.mode !== 'off' && (
+            <ListRow
+              action={
+                <SegmentedControl
+                  onChange={id => {
+                    triggerHaptic('selection')
+                    setCuttlefishDensity(Number(id) as 0 | 1 | 2)
+                  }}
+                  options={[
+                    { id: '0', label: a.cuttlefishDensityLow },
+                    { id: '1', label: a.cuttlefishDensityMid },
+                    { id: '2', label: a.cuttlefishDensityHigh }
+                  ]}
+                  value={String(cuttlefish.density)}
+                />
+              }
+              description={a.cuttlefishDensityDesc}
+              id={appearanceSettingElementId('appearance.cuttlefish.density')}
+              title={a.cuttlefishDensity}
+            />
+          )}
 
           <ListRow
             action={
