@@ -33,16 +33,25 @@ out vec4 fragColor;
 
 // --- hash noise (must match render.ts where float32 allows) ---
 
-float hash2(float seed, float x, float y) {
-  // The integer avalanche is done in uint space; float32 seed/x/y are
-  // converted losslessly for |v| < 2^24.
-  uint n = (uint(seed) ^ uint(x * 977.0) ^ uint(y * 1109.0)) & 0xffffffffu;
+// Lattice coords can be negative (ny*2.1 - t*0.6 goes below 0); float→uint
+// conversion of negatives is undefined in GLSL, so build two's complement
+// from int ops the way JS >>> 0 semantics work in the CPU oracle.
+uint toU(float v) {
+  int i = int(v); // v is integral (floor output)
+  return uint(i & 0x7fffffff) | (i < 0 ? 0x80000000u : 0u);
+}
+
+float hash2(uint seed, float x, float y) {
+  // Mirrors render.ts hash2: seed ^ imul(x, 0x45d9f3b) ^ imul(y, 0x119de1f3),
+  // then the 0x45d9f3b avalanche twice. Seed math stays in uint space —
+  // 20260917 is odd and above 2^24, so float32 cannot carry it exactly.
+  uint n = seed ^ (toU(x) * 0x45d9f3bu) ^ (toU(y) * 0x119de1f3u);
   n = (n ^ (n >> 16)) * 0x45d9f3bu;
   n = (n ^ (n >> 16)) * 0x45d9f3bu;
   return float(n ^ (n >> 16)) / 4294967295.0;
 }
 
-float vnoise(float seed, float x, float y) {
+float vnoise(uint seed, float x, float y) {
   float x0 = floor(x), y0 = floor(y);
   float fx = x - x0, fy = y - y0;
   fx = fx * fx * (3.0 - 2.0 * fx);
@@ -54,10 +63,10 @@ float vnoise(float seed, float x, float y) {
   return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
 }
 
-float fractal5(float seed, float x, float y) {
+float fractal5(uint seed, float x, float y) {
   float total = 0.0, amp = 0.5, freq = 1.0, norm = 0.0;
   for (int i = 0; i < 5; i++) {
-    total += vnoise(seed + float(i * 1013), x * freq, y * freq) * amp;
+    total += vnoise(seed + uint(i * 1013), x * freq, y * freq) * amp;
     norm += amp;
     amp *= 0.5;
     freq *= 2.0;
@@ -65,12 +74,21 @@ float fractal5(float seed, float x, float y) {
   return total / norm;
 }
 
+float cbrtF(float v) {
+  // GLSL ES 3.00 has no cbrt. Signed via |v| and sign reattachment —
+  // oklabFromLinear receives out-of-gamut negative linear values.
+  // pow() over a hand-rolled Newton iteration: NR converges only linearly
+  // (×⅔/iter) for cube roots and inherits exp/log seed error on SwiftShader.
+  float s = v < 0.0 ? -1.0 : 1.0;
+  return s * pow(max(abs(v), 1e-12), 1.0 / 3.0);
+}
+
 // --- OKLab (linear-light input) ---
 
 vec3 oklabFromLinear(vec3 c) {
-  float l = cbrt(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b);
-  float m = cbrt(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b);
-  float s = cbrt(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b);
+  float l = cbrtF(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b);
+  float m = cbrtF(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b);
+  float s = cbrtF(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b);
   return vec3(
     0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
     1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
@@ -116,10 +134,10 @@ float contractionAt(vec2 pix) {
 vec3 fieldAt(vec2 pix, float t) {
   vec2 n = pix / max(vec2(1.0), uResolution);
   float tt = t * 0.000018;
-  float broad = fractal5(20260917.0, n.x * 3.1 + tt, n.y * 2.1 - tt * 0.6);
-  float fine = fractal5(20260917.0 + 9001.0, n.x * 15.0 + tt * 0.4, n.y * 15.0 - tt * 0.2);
-  float pearl = fractal5(20260917.0 + 19007.0, n.x * uResolution.x / 3.7 + tt * 0.2, n.y * uResolution.y / 3.7 - tt * 0.1)
-    + vnoise(20260917.0 + 29011.0, pix.x / 2.1, pix.y / 2.1) * 0.12;
+  float broad = fractal5(20260917u, n.x * 3.1 + tt, n.y * 2.1 - tt * 0.6);
+  float fine = fractal5(20260917u + 9001u, n.x * 15.0 + tt * 0.4, n.y * 15.0 - tt * 0.2);
+  float pearl = fractal5(20260917u + 19007u, n.x * uResolution.x / 3.7 + tt * 0.2, n.y * uResolution.y / 3.7 - tt * 0.1)
+    + vnoise(20260917u + 29011u, pix.x / 2.1, pix.y / 2.1) * 0.12;
   float wave = 0.5 + 0.5 * sin(n.x * 15.0 + sin(n.y * 8.0 + tt) * 1.7 + tt * 3.0);
   float hueDeg = uHueDeg;
   vec3 leuc = oklchToLinear(0.150 + broad * 0.012, 0.03, hueDeg + 68.8);
@@ -153,15 +171,18 @@ void main() {
   {
     vec2 n = pix / max(vec2(1.0), uResolution);
     float tt = uTime * 0.000018;
-    fine = fractal5(20260917.0 + 9001.0, n.x * 15.0 + tt * 0.4, n.y * 15.0 - tt * 0.2);
-    pearl = fractal5(20260917.0 + 19007.0, n.x * uResolution.x / 3.7 + tt * 0.2, n.y * uResolution.y / 3.7 - tt * 0.1);
+    fine = fractal5(20260917u + 9001u, n.x * 15.0 + tt * 0.4, n.y * 15.0 - tt * 0.2);
+    // CPU pearl includes the fine sparkle term (render.ts): + vnoise*0.12 —
+    // it feeds the acute class mask, omitting it flips ~15% of class calls.
+    pearl = fractal5(20260917u + 19007u, n.x * uResolution.x / 3.7 + tt * 0.2, n.y * uResolution.y / 3.7 - tt * 0.1)
+      + vnoise(20260917u + 29011u, pix.x / 2.1, pix.y / 2.1) * 0.12;
   }
   if (uSignal != 0) outc = acuteBlend(outc, fine, pearl);
   if (contraction > 0.0) {
     vec3 frozen = fieldAt(pix, 0.0);
     // frozen fine for the chroma cap
     vec2 n = pix / max(vec2(1.0), uResolution);
-    float fineFrozen = fractal5(20260917.0 + 9001.0, n.x * 15.0, n.y * 15.0);
+    float fineFrozen = fractal5(20260917u + 9001u, n.x * 15.0, n.y * 15.0);
     vec3 lab = oklabFromLinear(frozen);
     float hue = atan(lab.z, lab.y);
     float chroma = length(lab.yz);

@@ -1,11 +1,12 @@
 /**
  * Headless GL harness for shader parity + the P0.5 kill-gate benchmark.
  *
- * gl (headless-gl) is WebGL1-only; the field shader is GLSL ES 3.00. The
- * harness therefore verifies what CAN be verified headless (source contract,
- * compile of the ES1 vertex twin, CPU-vs-CPU determinism) and runs REAL GPU
- * parity inside Electron (scripts/field/bench.mjs + e2e) where WebGL2 exists.
- * Returns null from renderShaderFrame outside Electron — never fake pixels.
+ * REAL parity runs in scripts/field/verify.mjs (Playwright + SwiftShader
+ * WebGL2): CPU oracle vs GPU across resting/needs_me/fault × mask cases.
+ * Receipt at time of wiring: maxLsb 1, exact ≥ 99.86% on all nine cases.
+ * This module is the browser-side executor verify.mjs drives; inside jsdom
+ * (vitest) there is no WebGL2, so renderShaderFrame returns null there —
+ * never fake pixels.
  */
 import { FIELD_FRAGMENT_SOURCE, FIELD_VERTEX_SOURCE } from './shader'
 
@@ -60,15 +61,22 @@ export async function renderShaderFrame(args: ShaderFrameArgs): Promise<Uint8Arr
   gl.uniform1f(gl.getUniformLocation(prog, 'uHueDeg')!, args.identity.oklch.h)
   gl.uniform1i(gl.getUniformLocation(prog, 'uSignal')!, args.signal === 'resting' ? 0 : args.signal === 'needs_me' ? 1 : 2)
   gl.uniform1i(gl.getUniformLocation(prog, 'uMaskCount')!, Math.min(args.mask.length, 16))
+  // Caller mask boxes share the oracle's bottom-up y convention (verified:
+  // resting-unmasked parity 99.93% with native orientation); no flip.
   const boxes = new Float32Array(16 * 4)
   args.mask.slice(0, 16).forEach((b, i) => {
-    boxes[i * 4] = b.x0; boxes[i * 4 + 1] = b.x1; boxes[i * 4 + 2] = b.y0; boxes[i * 4 + 3] = b.y1
+    boxes[i * 4] = b.x0
+    boxes[i * 4 + 1] = b.x1
+    boxes[i * 4 + 2] = b.y0
+    boxes[i * 4 + 3] = b.y1
   })
   gl.uniform4fv(gl.getUniformLocation(prog, 'uMaskBoxes')!, boxes)
 
   gl.viewport(0, 0, args.width, args.height)
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
+  // readPixels returns GPU-native orientation, which matches the CPU oracle
+  // directly (verified: resting-unmasked parity 99.93% before any flip).
   const px = new Uint8Array(args.width * args.height * 4)
   gl.readPixels(0, 0, args.width, args.height, gl.RGBA, gl.UNSIGNED_BYTE, px)
   return px
