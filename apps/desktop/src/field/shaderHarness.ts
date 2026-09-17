@@ -8,6 +8,7 @@
  * (vitest) there is no WebGL2, so renderShaderFrame returns null there —
  * never fake pixels.
  */
+import { SIGNAL_UNIFORM } from './signal'
 import { FIELD_FRAGMENT_SOURCE, FIELD_VERTEX_SOURCE } from './shader'
 
 export interface ShaderFrameArgs {
@@ -93,7 +94,7 @@ export async function renderShaderFrame(args: ShaderFrameArgs): Promise<Uint8Arr
   gl.uniform2f(gl.getUniformLocation(prog, 'uResolution')!, args.width, args.height)
   gl.uniform1f(gl.getUniformLocation(prog, 'uTime')!, args.timeMs)
   gl.uniform1f(gl.getUniformLocation(prog, 'uHueDeg')!, args.identity.oklch.h)
-  gl.uniform1i(gl.getUniformLocation(prog, 'uSignal')!, args.signal === 'resting' ? 0 : args.signal === 'needs_me' ? 1 : 2)
+  gl.uniform1i(gl.getUniformLocation(prog, 'uSignal')!, SIGNAL_UNIFORM[args.signal])
   gl.uniform1i(gl.getUniformLocation(prog, 'uMaskCount')!, Math.min(args.mask.length, 16))
   // Caller mask boxes share the oracle's bottom-up y convention (verified:
   // resting-unmasked parity 99.93% with native orientation); no flip.

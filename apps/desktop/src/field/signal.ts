@@ -6,6 +6,13 @@ import type { SessionDotState } from '@/store/session-dot-state'
 
 export type FieldSignal = 'resting' | 'needs_me' | 'fault'
 
+/** Uniform value for uSignal — the ONE mapping, shared by mount and harness. */
+export const SIGNAL_UNIFORM: Readonly<Record<FieldSignal, number>> = {
+  resting: 0,
+  needs_me: 1,
+  fault: 2,
+}
+
 /** Weakest-to-strongest acute semantics; only these dot states escalate. */
 const SIGNAL_BY_DOT: Partial<Record<SessionDotState, FieldSignal>> = {
   'needs-input': 'needs_me',
