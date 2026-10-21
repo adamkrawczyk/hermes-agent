@@ -346,8 +346,15 @@ class CLITuiMixin:
         return True
 
     def _get_extra_tui_widgets(self) -> list:
-        """Extension hook: wrapper CLIs return widgets inserted between the spacer and status bar."""
-        return []
+        """Extension hook: widgets inserted between the spacer and status bar.
+
+        Default: user widgets from ``$HERMES_HOME/cli-widgets/*.py`` (see ``cli_widgets``), loaded
+        once per CLI. Subclasses that override this hook are unaffected."""
+        cached = self.__dict__.get("_cli_widgets_cache")
+        if cached is None:
+            from hermes_cli.cli_widgets import load_cli_widgets
+            cached = self.__dict__["_cli_widgets_cache"] = load_cli_widgets(self)
+        return list(cached)
 
     def _register_extra_tui_keybindings(self, kb, *, input_area) -> None:
         """Extension hook: wrapper CLIs add bindings to ``kb`` (``input_area`` is the main TextArea)."""

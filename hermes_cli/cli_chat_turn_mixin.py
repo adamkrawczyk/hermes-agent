@@ -64,6 +64,7 @@ class CLIChatTurnMixin:
         set_secret_capture_callback(self._secret_capture_callback)
         # Reset per turn; only a real interrupt flips it, so early returns leave it False.
         self._last_turn_interrupted = False
+        self._last_error_kind = None  # cli-widgets snapshot; set again if this turn fails
 
         if not self._ensure_runtime_credentials():
             return None
@@ -516,6 +517,7 @@ class CLIChatTurnMixin:
                 provider=str(getattr(self.agent, "provider", "") or self.provider or ""),
                 model=str(getattr(self.agent, "model", "") or self.model or ""),
                 failure_reason=turn.result.get("failure_reason"))
+            self._last_error_kind = str(turn.result.get("failure_reason") or "error")
             # Stop continuous voice on persistent errors (e.g. 429) — else error→record→error loops.
             if self._voice_continuous:
                 self._voice_continuous = False
